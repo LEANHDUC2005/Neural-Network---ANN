@@ -1,0 +1,41 @@
+import numpy as np
+import math
+X = np.array([[0.5, 1, 1],
+              [1, 0.6, 1]])
+N = np.arange(2, 10, step = 2)
+sonoron = np.random.choice(N, size = 1)
+V = np.random.rand(2,int(sonoron))
+d = np.array([1, 0.3, 1.5])
+W = np.random.rand(V.shape[1])
+n = 0.1
+e = 1e-4
+def sigmoid(x):
+   return 1 /( 1 + np.exp(-x))
+
+Hoitu = False
+Solanhuanluyen = 0
+while not Hoitu:
+   E = 0
+   for i in range(X.shape[1]):
+      yh = np.empty(len(V))
+      X_i = X[:,i]
+      neth = V.T @ X_i
+      yh = sigmoid(neth)
+      neto = W.T @ yh
+      yo = neto
+      S_w =  d[i] - yo
+      W = W + n * S_w * yh
+      S_v = np.empty(V.shape[1])
+      E += 0.5 * (S_w**2)
+      for k in range(V.shape[1]):
+         S_v[k] = S_w * yh[k] * (1 - yh[k]) * W[k]
+         V[:,k] = V[:,k] + n * S_v[k] * X_i
+      
+   if E <= e:
+    Hoitu = True
+   else:
+    Solanhuanluyen +=1
+print(f"W = {W}")
+print(f'E = {E}')
+print(f"V = {V} ")
+print(f"So lan huan luyen {Solanhuanluyen}")
