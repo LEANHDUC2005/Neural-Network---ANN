@@ -1,0 +1,136 @@
+# --- Import thư viện ---
+import torch
+import torch.nn as nn
+import torchaudio
+import sounddevice as sd
+import numpy as np
+import os
+
+# --- Tạo vocab: chữ cái và ký tự cơ bản ---
+vocab = {ch: idx for idx, ch in enumerate("abcdefghijklmnopqrstuvwxyz ',.!?", start=1)}
+vocab['<unk>'] = 0
+
+# --- Hàm xử lý văn bản ---
+def text_to_sequence(text, vocab):
+    return [vocab.get(ch, vocab['<unk>']) for ch in text.lower() if ch in vocab]
+
+# --- Hàm xử lý âm thanh ---
+def audio_to_mel(audio_path, target_sample_rate=16000):
+    waveform, sample_rate = torchaudio.load(audio_path)
+    if sample_rate != target_sample_rate:
+        waveform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sample_rate)(waveform)
+    mel = torchaudio.transforms.MelSpectrogram(
+        sample_rate=target_sample_rate,
+        n_fft=400,
+        hop_length=160,
+        n_mels=80
+    )(waveform)
+    return mel
+
+# --- Định nghĩa mô hình ---
+class SimpleSpeechSynthesizer(nn.Module):
+    def __init__(self, vocab_size, embedding_dim=128, hidden_dim=256):
+        super(SimpleSpeechSynthesizer, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.encoder = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
+        self.mel_linear = nn.Linear(hidden_dim, 80)
+        self.vocoder = nn.Sequential(
+            nn.Conv1d(80, 256, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Conv1d(256, 1, kernel_size=5, padding=2),
+            nn.Tanh()
+        )
+
+    def forward(self, text_seq):
+        x = self.embedding(text_seq)
+        x, _ = self.encoder(x)
+        mel = self.mel_linear(x)
+        mel = mel.transpose(1, 2)  # (batch, channels, time)
+        waveform = self.vocoder(mel)
+        waveform = waveform.squeeze(1)  # (batch, time)
+        return waveform
+
+# --- Khởi tạo mô hình ---
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = SimpleSpeechSynthesizer(vocab_size=len(vocab)).to(device)
+loss_fn = nn.L1Loss()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+# --- Chuẩn bị bộ dữ liệu ---
+dataset = [
+    ("hello world", "hello.wav"),
+    ("how are you", "how.wav"),
+]
+
+# --- HUẤN LUYỆN ---
+print("🚀 Đang huấn luyện mô hình...\n")
+
+for epoch in range(30):
+    total_loss = 0
+    for text, audio_path in dataset:
+        if not os.path.exists(audio_path):
+            print(f"⚠️ File {audio_path} chưa tồn tại!")
+            continue
+        
+        text_seq = text_to_sequence(text, vocab)
+        text_tensor = torch.tensor(text_seq, dtype=torch.long).unsqueeze(0).to(device)
+
+        mel_spec = audio_to_mel(audio_path).to(device)  # (1, 80, time)
+        mel_spec = mel_spec[:, :, :text_tensor.size(1)]  # Resize cho khớp text length
+
+        # Forward
+        optimizer.zero_grad()
+        output = model(text_tensor)
+
+        # Resize output để khớp mel_spec
+        if output.size(1) > mel_spec.size(2):
+            output = output[:, :mel_spec.size(2)]
+        else:
+            mel_spec = mel_spec[:, :, :output.size(1)]
+
+        output = output.unsqueeze(1)  # (batch, 1, time)
+        mel_spec = mel_spec.permute(0, 2, 1)  # (batch, time, 1)
+
+        loss = loss_fn(output, mel_spec)
+        total_loss += loss.item()
+
+        # Backward
+        loss.backward()
+        optimizer.step()
+
+    print(f"Epoch [{epoch+1}/30] - Loss: {total_loss/len(dataset):.4f}")
+
+print("\n✅ Huấn luyện xong!\n")
+
+# --- Lưu mô hình ---
+torch.save(model.state_dict(), 'speech_synthesizer.pth')
+
+# --- Load lại model ---
+model.load_state_dict(torch.load('speech_synthesizer.pth', map_location=device))
+model.eval()
+
+# --- DỰ ĐOÁN và PHÁT ÂM THANH ---
+print("🎤 Nhập văn bản để nghe âm thanh!\n")
+
+while True:
+    text = input("Nhập văn bản (gõ 'exit' để thoát): ")
+    if text.lower() == 'exit':
+        break
+
+    text_seq = text_to_sequence(text, vocab)
+    if len(text_seq) == 0:
+        print("⚠️ Văn bản rỗng hoặc chứa ký tự không hỗ trợ.")
+        continue
+
+    text_tensor = torch.tensor(text_seq, dtype=torch.long).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        waveform = model(text_tensor)
+
+    waveform_np = waveform.squeeze(0).cpu().numpy()
+    waveform_np = waveform_np / (np.max(np.abs(waveform_np)) + 1e-9)  # Normalize [-1, 1]
+
+    print("🔊 Phát âm thanh...")
+    sd.play(waveform_np, samplerate=16000)
+    sd.wait()
+    print("✅ Xong!\n")
