@@ -1,0 +1,82 @@
+from gtts import gTTS
+import pyaudio
+import io
+import wave
+from gtts.lang import tts_langs
+while True:
+# Văn bản cần đọc
+    text = input("Nhập văn bản mà bạn muốn chuyển đổi:")
+
+    langs = tts_langs()
+    print(f"| {'Mã':<6} | {'Ngôn ngữ':<30} |")
+    print("|" + "-"*6 + "|" + "-"*32 + "|")
+    for code, language in langs.items():
+        print(f"| {code:<6} | {language:<30} |")
+    lang = input("Chọn ngôn ngữ:")
+    print(" Âm thanh sau khi chuyển đổi: ")
+# Chuyển văn bản thành âm thanh (gTTS trả về file mp3)
+    tts = gTTS(text=text, lang='vi')
+    
+# Lưu vào bộ nhớ RAM thay vì lưu file
+    mp3_fp = io.BytesIO()
+    tts.write_to_fp(mp3_fp)
+    mp3_fp.seek(0)
+
+# Bạn cần chuyển từ mp3 -> wav để PyAudio đọc được
+    from pydub import AudioSegment
+    audio = AudioSegment.from_file(mp3_fp, format="mp3")
+
+# Chuyển audio thành dạng raw data
+    raw_data = io.BytesIO()
+    audio.export(raw_data, format="wav")
+    raw_data.seek(0)
+
+# Đọc file wav để lấy params cho PyAudio
+    wf = wave.open(raw_data, 'rb')
+
+# Khởi tạo PyAudio
+    p = pyaudio.PyAudio()
+
+# Mở luồng âm thanh
+    stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                    channels=wf.getnchannels(),
+                    rate=wf.getframerate(),
+                    output=True)
+
+# Đọc và phát âm thanh
+    chunk = 1024
+    data = wf.readframes(chunk)
+    while data:
+        stream.write(data)
+        data = wf.readframes(chunk)
+
+# Dọn dẹp
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+
+#📌 Giải thích nhanh:
+# gTTS sinh ra file mp3.
+
+# Dùng pydub để chuyển mp3 thành wav trong bộ nhớ RAM (không cần lưu file).
+
+# PyAudio phát trực tiếp dòng dữ liệu từ file wav đó.
+
+# Thư viện cần :
+# gTTS : pip install gTTS
+# Pyaudio : pip install PyAudio
+# Pydub: pip install pydub
+
+## 1. ffmpeg: https://www.gyan.dev/ffmpeg/builds/ ( Tai ffmpeg-release-essentials.zip ) -> Giải nén
+## Sau khi cài đặt -> thêm ffmpeg vào path :
+## 2. Thêm ffmpeg vào hệ thống PATH (Windows):
+# Copy đường dẫn tới thư mục bin (ví dụ: C:\ffmpeg\bin).
+# Bấm Start Menu → Tìm Environment Variables → Bấm Edit the system environment variables.
+# Chọn Environment Variables.
+# Ở phần System variables, chọn Path → Edit → New → Dán đường dẫn = đường dẫn đến file bin của ffmpeg trên máy bạn để nó đọc cả 3 file .exe VD: C:\ffmpeg\bin
+# Ấn OK hết.
+
+# Cập nhật PATH cho môi trường Anaconda:
+# Mở Anaconda Prompt và gõ lệnh: conda install ffmpeg
+# Sau đó, bạn có thể kiểm tra lại bằng lệnh: conda list ffmpeg
+# Thêm đường dẫn vào PATH trong Anaconda: set PATH= đường dẫn đến file bin của ffmpeg để nó đọc cả 3 file .exe (Ví dụ C:\ffmpeg\bin).
