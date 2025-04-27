@@ -1,0 +1,184 @@
+import librosa
+import torch
+import torch.nn as nn
+import torchaudio
+import torch.nn.functional as F
+import numpy as np
+import pyaudio
+import os
+
+
+# --- Tạo vocab: chữ cái và ký tự cơ bản ---
+vocab = {ch: idx for idx, ch in enumerate("abcdefghijklmnopqrstuvwxyz ',.!?", start=1)}
+vocab['<unk>'] = 0
+
+# --- Hàm xử lý văn bản ---
+def text_to_sequence(text, vocab):
+    return [vocab.get(ch, vocab['<unk>']) for ch in text.lower() if ch in vocab]
+
+# --- Hàm xử lý âm thanh ---
+def audio_to_mel(audio_path):
+    waveform, sample_rate = torchaudio.load(audio_path)
+    transform = torchaudio.transforms.MelSpectrogram(
+        sample_rate=sample_rate, 
+        n_mels=80
+    )
+    mel = transform(waveform)  # [1, mel_dim, time_steps]
+    return mel
+
+# --- Mô hình Speech Synthesis đơn giản với vocoder CNN ---
+class SpeechSynthesizer(nn.Module):
+    def __init__(self, vocab_size, embedding_dim=128, hidden_dim=256, mel_dim=80):
+        super(SpeechSynthesizer, self).__init__()
+        # Text to embedding
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        
+        # Encoder: LSTM layer
+        self.encoder = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
+        
+        # Decoder: Linear to output mel-spectrogram
+        self.linear = nn.Linear(hidden_dim, mel_dim)
+
+    def forward(self, text_seq):
+        embedded = self.embedding(text_seq)  # [batch, seq_len, embedding_dim]
+        encoder_output, _ = self.encoder(embedded)  # [batch, seq_len, hidden_dim]
+        mel_output = self.linear(encoder_output)  # [batch, seq_len, mel_dim]
+        return mel_output
+
+
+class VocoderCNN(nn.Module):
+    def __init__(self, mel_dim=80, output_length=16000):
+        super(VocoderCNN, self).__init__()
+        
+        self.output_length = output_length  # Giả sử bạn muốn sóng âm có 16000 samples
+
+        # 1D Convolution layers for vocoder
+        self.conv1 = nn.Conv1d(mel_dim, 256, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv1d(256, 512, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv1d(512, 1024, kernel_size=3, stride=1, padding=1)
+        self.conv4 = nn.Conv1d(1024, 1, kernel_size=3, stride=1, padding=1)
+        
+        # Batch normalization layers
+        self.bn1 = nn.BatchNorm1d(256)
+        self.bn2 = nn.BatchNorm1d(512)
+        self.bn3 = nn.BatchNorm1d(1024)
+
+    def forward(self, mel_spec):
+        x = F.relu(self.bn1(self.conv1(mel_spec)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        output_waveform = self.conv4(x)
+
+        # Đảm bảo output_waveform có kích thước đúng
+        output_waveform = output_waveform.squeeze(1)  # [batch_size, time_steps]
+        if output_waveform.size(1) < self.output_length:
+            output_waveform = F.pad(output_waveform, (0, self.output_length - output_waveform.size(1)))
+        return output_waveform
+
+
+# --- Hàm phát âm thanh bằng PyAudio ---
+def play_audio(waveform, sample_rate=16000):
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paFloat32,
+                    channels=1,
+                    rate=sample_rate,
+                    output=True)
+    stream.write(waveform.astype(np.float32).tobytes())
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+
+# --- Khởi tạo mô hình ---
+vocab_size = len(vocab)
+speech_synthesizer = SpeechSynthesizer(vocab_size)
+vocoder_cnn = VocoderCNN()
+
+# --- Loss function và optimizer ---
+loss_fn = nn.L1Loss()
+optimizer = torch.optim.Adam(list(speech_synthesizer.parameters()) + list(vocoder_cnn.parameters()), lr=1e-3)
+
+# --- Chuẩn bị dataset --- (Giả lập)
+dataset = [
+    ("hello world", "hello.wav"),
+    ("how are you", "how.wav"),
+]
+
+# --- Huấn luyện mô hình ---
+print("🚀 Đang huấn luyện mô hình...\n")
+
+for epoch in range(100):
+    total_loss = 0
+    for text, audio_path in dataset:
+        if not os.path.exists(audio_path):
+            print(f"⚠️ File {audio_path} không tồn tại, bỏ qua.")
+            continue
+
+        # Chuẩn bị input
+        text_seq = text_to_sequence(text, vocab)
+        text_tensor = torch.tensor(text_seq, dtype=torch.long).unsqueeze(0)  # [batch_size, seq_len]
+
+        mel_spec = audio_to_mel(audio_path)  # [1, mel_dim, time_steps]
+        mel_spec = mel_spec.squeeze(0)  # Loại bỏ chiều batch (nếu cần)
+        mel_spec = mel_spec.transpose(0, 1)  # Đảm bảo các chiều khớp (mel_dim, time_steps)
+
+        # Forward
+        optimizer.zero_grad()
+
+        mel_output = speech_synthesizer(text_tensor)  # [1, seq_len, mel_dim]
+        mel_output_resized = mel_output.transpose(1, 2)  # [1, mel_dim, seq_len]
+
+        # Dự đoán waveform bằng vocoder CNN
+        waveform_output = vocoder_cnn(mel_output_resized)  # [batch_size, time_steps]
+        
+        # Kiểm tra lại các tensor trước khi tính toán loss
+        print(f"waveform_output size: {waveform_output.size()}")
+        print(f"mel_spec size: {mel_spec.size()}")
+
+        # Đảm bảo số lượng time steps của waveform_output khớp với mel_spec
+        if waveform_output.size(1) != mel_spec.size(-1):  # mel_spec.size(-1) lấy time_steps
+            waveform_output_resized = F.interpolate(waveform_output.unsqueeze(0), size=mel_spec.size(-1), mode='linear', align_corners=False).squeeze(0)
+        else:
+            waveform_output_resized = waveform_output
+
+        # Kiểm tra lại các tensor sau khi điều chỉnh kích thước
+        print(f"waveform_output_resized size: {waveform_output_resized.size()}")
+
+        # Tính loss
+        loss = loss_fn(waveform_output_resized, mel_spec)  # [batch_size, time_steps]
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    print(f"Epoch [{epoch+1}/100], Loss: {total_loss/len(dataset):.4f}")
+
+print("\n✅ Huấn luyện xong!\n")
+
+# --- Lưu mô hình ---
+torch.save(speech_synthesizer.state_dict(), 'speech_synthesizer.pth')
+torch.save(vocoder_cnn.state_dict(), 'vocoder_cnn.pth')
+print("💾 Đã lưu mô hình")
+
+# --- DỰ ĐOÁN: Nhập văn bản và phát âm thanh --- 
+while True:
+    text = input("📝 Nhập văn bản: ")
+    if text.lower() == 'exit':
+        break
+
+    if len(text.strip()) == 0:
+        continue
+
+    text_seq = text_to_sequence(text, vocab)
+    text_tensor = torch.tensor(text_seq, dtype=torch.long).unsqueeze(0)
+
+    with torch.no_grad():
+        mel_output = speech_synthesizer(text_tensor)  # [1, seq_len, mel_dim]
+        mel_output_resized = mel_output.transpose(1, 2)  # [1, mel_dim, seq_len]
+
+        # Dự đoán sóng âm từ mel-spectrogram
+        waveform = vocoder_cnn(mel_output_resized)  # [time_steps]
+
+    # Phát âm thanh
+    print("🔊 Phát âm thanh...")
+    play_audio(waveform.numpy(), sample_rate=16000)
+    print("✅ Xong!\n")
